@@ -2,8 +2,8 @@ import requests
 import json
 
 def get_feature_details_from_neuronpedia(model_id, sae_id, feature_index):
-    # url = f"https://www.neuronpedia.org/api/feature/{model_id}/{sae_id}/{feature_index}"
-    url = "https://www.neuronpedia.org/api/feature/gemma-2-2b/20-gemmascope-res-16k/16213"
+    # url example = "https://www.neuronpedia.org/api/feature/gemma-2-2b/20-gemmascope-res-16k/16213"
+    url = f"https://www.neuronpedia.org/api/feature/{model_id}/{sae_id}/{feature_index}"
     response = requests.get(url)
     if response.status_code == 200:
         return json.loads(response.text)
