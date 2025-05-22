@@ -10,16 +10,26 @@ from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer
 from huggingface_hub import hf_hub_download, notebook_login, HfFileSystem
 
 from sae import JumpReLUSAE
+from model_utils import download_sae_params
+from data_utils import GemmaChatState
 
 
-
-def run_lm(prompt, tokenizer, model):
+def run_lm(prompt, tokenizer, model, IT=False):
+  if IT:
+     chat = GemmaChatState()
+     prompt = chat.gen_single_chat_input(prompt)
+  else:
+     prefix = "The following is a helpful and friendly conversation between a user and an AI assistant.\nUser: "
+     suffix = "\nAssistant: "
+     prompt = prefix + prompt + suffix
   # Use the tokenizer to convert it to tokens. Note that this implicitly adds a special "Beginning of Sequence" or <bos> token to the start
+  print(prompt)
   inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True, return_offsets_mapping=True).to("cuda")
-  print(inputs)
   outputs = model.generate(input_ids=inputs, max_new_tokens=100)
-  print(tokenizer.decode(outputs[0]))
-  return inputs, tokenizer.decode(outputs[0])
+  outputs_string = tokenizer.decode(outputs[0])
+  outputs_string = outputs_string.replace(prompt, "")
+  print(outputs_string+"\n")
+  return inputs, outputs_string
   
 
 def gather_residual_activations(model, target_layer, inputs):
@@ -35,30 +45,51 @@ def gather_residual_activations(model, target_layer, inputs):
 
 
 if __name__ == "__main__":
+    """
+    Source: Neuronpedia / Google Deepmind
+    [TABLE] model | sae weights | layers | feature_probing
+    --------------------------------------------------------------------------------
+    "google/gemma-2-2b" | google/gemma-scope-2b-pt-res | All(26)
+    "google/gemma-2-2b" | google/gemma-scope-2b-pt-mlp | All(26)
+    "google/gemma-2-2b" | google/gemma-scope-2b-pt-att | All(26) | {layer}-GEMMASCOPE-ATT-16K
+    --------------------------------------------------------------------------------
+    "google/gemma-2-9b" | google/gemma-scope-9b-pt-res | All(42)
+    "google/gemma-2-9b" | google/gemma-scope-9b-pt-mlp | All(42)
+    "google/gemma-2-9b" | google/gemma-scope-9b-pt-att | All(42) | {layer}-GEMMASCOPE-ATT-16K
+    --------------------------------------------------------------------------------
+    "google/gemma-2-9b-it" | google/gemma-scope-9b-it-res | {9, 31, 20} | {layer}-GEMMASCOPE-RES-16K
+    "google/gemma-2-9b-it" | google/gemma-scope-9b-pt-* | All(42) | {layer}-GEMMASCOPE-*-16K
+    (SAEs trained on Gemma 2 9B base transfer very well to the IT model, and these IT SAEs only work marginally better)
+    """
+
     # load model and tokenizer
     torch.set_grad_enabled(False) # avoid blowing up mem
-    model_path = "google/gemma-2-2b"
+    model_path = "google/gemma-2-9b-it" # layer_num = 26, hf_repo_id = "google/gemma-scope-2b-pt-res"
+    hf_repo_id = "google/gemma-scope-9b-pt-mlp"
+    instrunct_tunned = True if "it" in model_path else False
+    save_start_token_idx = 18 if instrunct_tunned == False else 0
+    model_layers = 26 if "2b" in model_path else 42
     save_model_path = "/home/yejeon/models/" + model_path
+    result_save_path = f"/home/yejeon/llm_control/results/{hf_repo_id.split("/")[1]}.json"
 
+    # sae weights directory for the model
+    fs = HfFileSystem()
     model = AutoModelForCausalLM.from_pretrained(save_model_path, device_map='auto')
     tokenizer = AutoTokenizer.from_pretrained(save_model_path)
-    model_layers = 26
 
     # load data
     neg_data_path = "/home/yejeon/feature-circuits/data/advbench_harmful_behaviors.csv"
     data = pd.read_csv(neg_data_path)
     data= data['goal'].tolist()
-    
-    fs = HfFileSystem()
-    hf_repo_id = "google/gemma-scope-2b-pt-res"
-    json_data = {}
 
+    json_data = {}
     for prompt in data:
       # run prompt
-      input_tokens, response = run_lm(prompt, tokenizer, model)
-      token_to_string = [tokenizer.decode(token) for token in input_tokens[0]]
+      input_tokens, response = run_lm(prompt, tokenizer, model, IT=instrunct_tunned)
+      token_to_string = [tokenizer.decode(token) for token in input_tokens[0]] # for save
       # format json result
       json_data[prompt] = {}
+      json_data[prompt]["input"] = token_to_string[save_start_token_idx:]
       json_data[prompt]["output"] = response
       json_data[prompt]["features"] = {}
       json_data[prompt]["layers"] = {"sparsity": {}, "recon_score": {}}
@@ -73,25 +104,20 @@ if __name__ == "__main__":
         # every layer has different features per sparsity
         relu_sparsity = []
         act_recon_variance = []
-        top_features_per_token = {word: [] for word in token_to_string}
+        top_features_per_token = [[] for _ in range(len(token_to_string))]
         for j in range(len(sae_filenames)):
           sub_sae_filename = sae_filenames[j]
           sparsity = sub_sae_filename.split("/")[-1].split("_")[-1]
           refined_filename = sub_sae_filename.replace(hf_repo_id+"/", "") + "/params.npz"
           # load sae parameters
-          path_to_params = hf_hub_download(
-              repo_id=hf_repo_id,
-              filename=refined_filename,
-              force_download=False,
-          )
-          sae_params = np.load(path_to_params)
+          sae_params = download_sae_params(hf_repo_id, refined_filename)
           pt_params = {k: torch.from_numpy(v).cuda() for k, v in sae_params.items()}
           sae = JumpReLUSAE(sae_params['W_enc'].shape[0], sae_params['W_enc'].shape[1])
           sae.load_state_dict(pt_params)
 
           # get model activations for specific layer
           target_act = gather_residual_activations(model, layer_num, input_tokens)
-
+       
           # run sae and get feature activations
           sae.cuda()
           sae_acts = sae.encode(target_act.to(torch.float32))
@@ -104,19 +130,19 @@ if __name__ == "__main__":
 
           # get most activating features on the input text on each token position
           token_to_string = [tokenizer.decode(token) for token in input_tokens[0]]
-          values, inds = sae_acts.max(-1)
+          values, inds = sae_acts.topk(5, dim=-1)
           for token_idx in range(len(token_to_string)):
-              top_features_per_token[token_to_string[token_idx]].append(inds[0][token_idx].item())
+            top_features_per_token[token_idx].append(inds[0][token_idx].tolist())
           relu_sparsity.append(sparsity)
         
         # write json
-        json_data[prompt]["features"][layer_num] = top_features_per_token
+        json_data[prompt]["features"][layer_num] = top_features_per_token[save_start_token_idx:]
         json_data[prompt]["layers"]["sparsity"][layer_num].extend(relu_sparsity)
         json_data[prompt]["layers"]["recon_score"][layer_num].extend(act_recon_variance)
 
         # Serializing json
         result_json = json.dumps(json_data, indent=4)
-        with open("/home/yejeon/feature-circuits/results/res_activation.json", "w") as outfile:
+        with open(result_save_path, "w") as outfile:
             outfile.write(result_json)
 
 
