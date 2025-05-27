@@ -166,6 +166,6 @@ circuits/*
 dictionaries/*
 experiments/effects/*
 experiments/faithfulness/*
-nohup.out
+*nohup.out
 
 results/

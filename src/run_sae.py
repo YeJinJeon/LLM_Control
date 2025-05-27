@@ -64,13 +64,13 @@ if __name__ == "__main__":
 
     # load model and tokenizer
     torch.set_grad_enabled(False) # avoid blowing up mem
-    model_path = "google/gemma-2-9b-it" # layer_num = 26, hf_repo_id = "google/gemma-scope-2b-pt-res"
+    model_path = "google/gemma-2-9b" # layer_num = 26, hf_repo_id = "google/gemma-scope-2b-pt-res"
     hf_repo_id = "google/gemma-scope-9b-pt-mlp"
     instrunct_tunned = True if "it" in model_path else False
     save_start_token_idx = 18 if instrunct_tunned == False else 0
     model_layers = 26 if "2b" in model_path else 42
     save_model_path = "/home/yejeon/models/" + model_path
-    result_save_path = f"/home/yejeon/llm_control/results/{hf_repo_id.split("/")[1]}.json"
+    result_save_path = f"/home/yejeon/llm_control/results/{model_path.split("/")[1]}.json"
 
     # sae weights directory for the model
     fs = HfFileSystem()
