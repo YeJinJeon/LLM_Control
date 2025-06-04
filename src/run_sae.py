@@ -11,11 +11,11 @@ from huggingface_hub import hf_hub_download, notebook_login, HfFileSystem
 
 from sae import JumpReLUSAE
 from model_utils import download_sae_params
-from data_utils import GemmaChatState
+from input_utils import GemmaChatState
 
 
 def run_lm(prompt, tokenizer, model, IT=False):
-  if IT:
+  if IT: #instruction-tunning
      chat = GemmaChatState()
      prompt = chat.gen_single_chat_input(prompt)
   else:
@@ -32,7 +32,7 @@ def run_lm(prompt, tokenizer, model, IT=False):
   return inputs, outputs_string
   
 
-def gather_residual_activations(model, target_layer, inputs):
+def gather_residual_activations_pytorch(model, target_layer, inputs):
   target_act = None
   def gather_target_act_hook(mod, inputs, outputs):
     nonlocal target_act # make sure we can modify the target_act from the outer scope
@@ -64,8 +64,8 @@ if __name__ == "__main__":
 
     # load model and tokenizer
     torch.set_grad_enabled(False) # avoid blowing up mem
-    model_path = "google/gemma-2-9b" # layer_num = 26, hf_repo_id = "google/gemma-scope-2b-pt-res"
-    hf_repo_id = "google/gemma-scope-9b-pt-mlp"
+    model_path = "google/gemma-2-2b" # layer_num = 26, hf_repo_id = "google/gemma-scope-2b-pt-res"
+    hf_repo_id = "google/gemma-scope-2b-pt-mlp"
     instrunct_tunned = True if "it" in model_path else False
     save_start_token_idx = 18 if instrunct_tunned == False else 0
     model_layers = 26 if "2b" in model_path else 42
@@ -100,41 +100,44 @@ if __name__ == "__main__":
         json_data[prompt]["layers"]["recon_score"][layer_num] = []
         json_data[prompt]["features"][layer_num] = {}
         sae_filenames = fs.glob(f"{hf_repo_id}/layer_{layer_num}/width_16k/average_l0_*")
+        files_with_l0s = [
+          (f, int(f.split("_")[-1])) for f in sae_filenames]
+        optimal_file = min(files_with_l0s, key=lambda x: abs(x[1] - 100))[0]
 
         # every layer has different features per sparsity
         relu_sparsity = []
         act_recon_variance = []
         top_features_per_token = [[] for _ in range(len(token_to_string))]
-        for j in range(len(sae_filenames)):
-          sub_sae_filename = sae_filenames[j]
-          sparsity = sub_sae_filename.split("/")[-1].split("_")[-1]
-          refined_filename = sub_sae_filename.replace(hf_repo_id+"/", "") + "/params.npz"
-          # load sae parameters
-          sae_params = download_sae_params(hf_repo_id, refined_filename)
-          pt_params = {k: torch.from_numpy(v).cuda() for k, v in sae_params.items()}
-          sae = JumpReLUSAE(sae_params['W_enc'].shape[0], sae_params['W_enc'].shape[1])
-          sae.load_state_dict(pt_params)
+        # for j in range(len(sae_filenames)):
+        sub_sae_filename = optimal_file
+        sparsity = sub_sae_filename.split("/")[-1].split("_")[-1]
+        refined_filename = sub_sae_filename.replace(hf_repo_id+"/", "") + "/params.npz"
+        # load sae parameterså
+        sae_params = download_sae_params(hf_repo_id, refined_filename)
+        pt_params = {k: torch.from_numpy(v).cuda() for k, v in sae_params.items()}
+        sae = JumpReLUSAE(sae_params['W_enc'].shape[0], sae_params['W_enc'].shape[1])
+        sae.load_state_dict(pt_params)
 
-          # get model activations for specific layer
-          target_act = gather_residual_activations(model, layer_num, input_tokens)
-       
-          # run sae and get feature activations
-          sae.cuda()
-          sae_acts = sae.encode(target_act.to(torch.float32))
-          recon = sae.decode(sae_acts)
+        # get model activations for specific layer
+        target_act = gather_residual_activations_pytorch(model, layer_num, input_tokens)
+      
+        # run sae and get feature activations
+        sae.cuda()
+        sae_acts = sae.encode(target_act.to(torch.float32))
+        recon = sae.decode(sae_acts)
 
-          # verify
-          recon_score = 1 - torch.mean((recon[:, 1:] - target_act[:, 1:].to(torch.float32)) **2) / (target_act[:, 1:].to(torch.float32).var())
-          act_recon_variance.append(recon_score.item())
-          # print((sae_acts > 1).sum(-1))
+        # verify
+        recon_score = 1 - torch.mean((recon[:, 1:] - target_act[:, 1:].to(torch.float32)) **2) / (target_act[:, 1:].to(torch.float32).var())
+        act_recon_variance.append(recon_score.item())
+        # print((sae_acts > 1).sum(-1))
 
-          # get most activating features on the input text on each token position
-          token_to_string = [tokenizer.decode(token) for token in input_tokens[0]]
-          values, inds = sae_acts.topk(5, dim=-1)
-          for token_idx in range(len(token_to_string)):
-            top_features_per_token[token_idx].append(inds[0][token_idx].tolist())
-          relu_sparsity.append(sparsity)
-        
+        # get most activating features on the input text on each token position
+        token_to_string = [tokenizer.decode(token) for token in input_tokens[0]]
+        values, inds = sae_acts.topk(5, dim=-1)
+        for token_idx in range(len(token_to_string)):
+          top_features_per_token[token_idx].append(inds[0][token_idx].tolist())
+        relu_sparsity.append(sparsity)
+      
         # write json
         json_data[prompt]["features"][layer_num] = top_features_per_token[save_start_token_idx:]
         json_data[prompt]["layers"]["sparsity"][layer_num].extend(relu_sparsity)

@@ -108,6 +108,14 @@ def check_refusal_existence(data):
         with open("/home/yejeon/llm_control/results/refusl-features-v2-gemma-2-9b-it-mlp.json", "w") as outfile:
             outfile.write(result_json)
 
+def get_sae_feature_vectors(layer, f_id):
+    # get activation features on every layer
+      for layer_num in tqdm.tqdm(range(model_layers)):
+        json_data[prompt]["layers"]["sparsity"][layer_num] = []
+        json_data[prompt]["layers"]["recon_score"][layer_num] = []
+        json_data[prompt]["features"][layer_num] = {}
+        sae_filenames = fs.glob(f"{hf_repo_id}/layer_{layer_num}/width_16k/average_l0_*")
+
 if __name__ == "__main__":
     result_file = "/home/yejeon/llm_control/results/gemma-2-9b-it-mlp.json"
     with open(result_file, 'r') as file:
