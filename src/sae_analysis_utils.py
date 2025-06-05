@@ -58,9 +58,7 @@ def get_features_for_target_tokens(data, prob_locs):
     return f_dict
 
 
-def check_refusal_existence(data):
-    sae_model_id = "gemma-2-9b"
-    num_layer = 42
+def check_refusal_existence(data, sae_model_id, num_layer):
     target_feature_desc = ["negation", "denial", "rejection", "refusal", "hesitation", "warn", "inability", 
                            "capability", "lack", "request", "restriction", "prevention", "danger", "harmful", "safety"]
 
@@ -81,7 +79,6 @@ def check_refusal_existence(data):
         input_str_list = data[prompt]['input']
         bad_str_idx = [idx for idx, token in enumerate(input_str_list) for s in bad_str if s in token]
         prob_str_idx = bad_str_idx + begin_model_str_idx
-        prob_str = [input_str_list[idx] for idx in prob_str_idx]
 
         # extract features 
         top5_token_features_per_layer = get_features_for_target_tokens(data[prompt], prob_str_idx)
@@ -103,24 +100,42 @@ def check_refusal_existence(data):
                             refusal_features[prompt]["t_idx"].append(t_idx)
                             refusal_features[prompt]["f_idx"].append(f)
                             refusal_features[prompt]["f_desc"].append(f_desc)
-        # Serializing json
-        result_json = json.dumps(refusal_features, indent=4)
-        with open("/home/yejeon/llm_control/results/refusl-features-v2-gemma-2-9b-it-mlp.json", "w") as outfile:
-            outfile.write(result_json)
+            # Serializing json
+            result_json = json.dumps(refusal_features, indent=4)
+            with open("/home/yejeon/llm_control/results/refusl-features-gemma-2-2b-mlp.json", "w") as outfile:
+                outfile.write(result_json)
 
-def get_sae_feature_vectors(layer, f_id):
-    # get activation features on every layer
-      for layer_num in tqdm.tqdm(range(model_layers)):
-        json_data[prompt]["layers"]["sparsity"][layer_num] = []
-        json_data[prompt]["layers"]["recon_score"][layer_num] = []
-        json_data[prompt]["features"][layer_num] = {}
-        sae_filenames = fs.glob(f"{hf_repo_id}/layer_{layer_num}/width_16k/average_l0_*")
+
+def get_refusal_info(data):
+    explanation = {}
+    refusal_info_per_prompt = {p: {} for p in data}
+    for p, info in data.items():
+        layers = info["l_idx"]
+        features = info["f_idx"]
+        descs = info["f_desc"]
+        for i, l in enumerate(layers):
+            f = features[i]
+            d = descs[i]
+            # add refusal info
+            if l in refusal_info[p]:
+                refusal_info[p][l].append(f)
+            else:
+                refusal_info[p][l] = [f]
+            # add explanation
+            explanation[(l,f)] = d
+    return refusal_info, explanation
+
+    
 
 if __name__ == "__main__":
-    result_file = "/home/yejeon/llm_control/results/gemma-2-9b-it-mlp.json"
+    result_file = "/home/yejeon/llm_control/results/gemma-2-2b.json"
+    sae_model_id = "gemma-2-2b"
+    num_layer = 26
     with open(result_file, 'r') as file:
         data = json.load(file)
-    check_refusal_existence(data)
+    check_refusal_existence(data, sae_model_id, num_layer)
+
+    refusal_file = "/home/yejeon/llm_control/results/refusal-features-gemma-2-2b-mlp.json"
 
         
 
